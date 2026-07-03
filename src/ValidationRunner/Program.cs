@@ -21,10 +21,10 @@ internal sealed class ValidationRunner(RunnerOptions options)
 
     public async Task<int> RunAsync()
     {
-        var token = FirstNonEmpty(
+        var token = NormalizeHeaderToken(FirstNonEmpty(
             Environment.GetEnvironmentVariable("PLATFORM_AUTH_TOKEN"),
             Environment.GetEnvironmentVariable("GH_TOKEN"),
-            Environment.GetEnvironmentVariable("GITHUB_TOKEN"));
+            Environment.GetEnvironmentVariable("GITHUB_TOKEN")));
 
         if (string.IsNullOrWhiteSpace(token))
         {
@@ -292,6 +292,15 @@ internal sealed class ValidationRunner(RunnerOptions options)
 
     private static string? FirstNonEmpty(params string?[] values) =>
         values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))?.Trim();
+
+    private static string? NormalizeHeaderToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var cleaned = new string(value.Where(ch => ch is >= '!' and <= '~').ToArray());
+        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
+    }
 
     private static long ParseLong(string? value) =>
         long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
