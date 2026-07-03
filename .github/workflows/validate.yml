@@ -1,0 +1,54 @@
+name: Validate
+run-name: validate
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: validation-runner
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      PLATFORM_BASE_URL: ${{ vars.PLATFORM_BASE_URL || secrets.PLATFORM_BASE_URL }}
+      PLATFORM_AUTH_TOKEN: ${{ secrets.PLATFORM_AUTH_TOKEN }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+    steps:
+      - name: Checkout runner
+        uses: actions/checkout@v4
+
+      - name: Checkout GameClient config and tests
+        uses: actions/checkout@v4
+        with:
+          repository: frostebite/GameClient
+          path: GameClient
+          token: ${{ secrets.GAMECLIENT_REPO_TOKEN || github.token }}
+          fetch-depth: 1
+          lfs: false
+          submodules: recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore runner
+        run: dotnet restore ValidationRunner.sln --nologo --verbosity quiet
+
+      - name: Run validation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GAMECLIENT_CONFIG_ROOT: ${{ github.workspace }}/GameClient
+        run: dotnet run --project src/ValidationRunner -- --gameclient "$GAMECLIENT_CONFIG_ROOT"
