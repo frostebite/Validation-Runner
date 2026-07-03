@@ -39,6 +39,11 @@ jobs:
       - name: Checkout runner
         uses: actions/checkout@v4
 
+      - name: Enable Windows long paths for Git
+        if: matrix.target == 'windows'
+        shell: powershell
+        run: git config --global core.longpaths true
+
       - name: Checkout GameClient config and tests
         uses: actions/checkout@v4
         with:
