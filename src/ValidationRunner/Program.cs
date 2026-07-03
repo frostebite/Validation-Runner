@@ -77,7 +77,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
             catch (Exception ex)
             {
                 failures++;
-                Console.WriteLine($"{label}: error={ex.GetType().Name}");
+                Console.WriteLine($"{label}: error={FormatSafeError(ex)}");
             }
         }
 
@@ -113,7 +113,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
             + "&status=success&flagSandbox=true&page=1&limit=25";
 
         using var response = await http.GetAsync(path);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessAsync(response, "list builds");
         var payload = await response.Content.ReadFromJsonAsync<BuildListResponse>(_json);
         return payload?.Builds?
             .Where(b => b.Id > 0)
@@ -133,7 +133,9 @@ internal sealed class ValidationRunner(RunnerOptions options)
     private async Task<string> DownloadAndExtractAsync(HttpClient http, BuildRecord build, string workDir)
     {
         var zipPath = Path.Combine(workDir, "build.zip");
-        await using (var source = await http.GetStreamAsync($"api/ci-builds/{build.Id}/download-folder"))
+        using var response = await http.GetAsync($"api/ci-builds/{build.Id}/download-folder", HttpCompletionOption.ResponseHeadersRead);
+        await EnsureSuccessAsync(response, "download build");
+        await using (var source = await response.Content.ReadAsStreamAsync())
         await using (var target = File.Create(zipPath))
         {
             await source.CopyToAsync(target);
@@ -261,6 +263,31 @@ internal sealed class ValidationRunner(RunnerOptions options)
         using var response = await http.SendAsync(request);
         if (!response.IsSuccessStatusCode)
             Console.WriteLine($"{profile.Framework}/{profile.Profile}: platform ingest status={(int)response.StatusCode}");
+    }
+
+    private static async Task EnsureSuccessAsync(HttpResponseMessage response, string operation)
+    {
+        if (response.IsSuccessStatusCode)
+            return;
+
+        var body = await response.Content.ReadAsStringAsync();
+        if (body.Length > 160)
+            body = body[..160];
+        throw new HttpRequestException(
+            $"{operation} failed: {(int)response.StatusCode} {response.ReasonPhrase}; {body}",
+            null,
+            response.StatusCode);
+    }
+
+    private static string FormatSafeError(Exception ex)
+    {
+        if (ex is HttpRequestException httpEx)
+        {
+            var status = httpEx.StatusCode.HasValue ? $" status={(int)httpEx.StatusCode.Value}" : "";
+            return $"{httpEx.GetType().Name}{status}: {httpEx.Message}";
+        }
+
+        return ex.GetType().Name;
     }
 
     private static string? FirstNonEmpty(params string?[] values) =>
