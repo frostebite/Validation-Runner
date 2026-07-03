@@ -37,7 +37,8 @@ internal sealed class ValidationRunner(RunnerOptions options)
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("Validation-Runner/1.0");
 
-        var profiles = ProfileDiscovery.Discover(options.GameClientRoot).ToList();
+        var profiles = ProfileDiscovery.Discover(options.GameClientRoot, options.TargetPlatform).ToList();
+        Console.WriteLine($"target={options.TargetPlatform}");
         Console.WriteLine($"profiles={profiles.Count}");
 
         var failures = 0;
@@ -45,13 +46,15 @@ internal sealed class ValidationRunner(RunnerOptions options)
         foreach (var profile in profiles)
         {
             index++;
-            var label = $"{profile.Framework}/{profile.Profile}";
+            var label = $"{options.TargetPlatform}:{profile.Framework}/{profile.Profile}";
             try
             {
-                var build = await FindLatestLinuxSandboxBuildAsync(http, profile);
+                var build = await FindLatestSandboxBuildAsync(http, profile);
                 if (build is null)
                 {
-                    Console.WriteLine($"{label}: no linux sandbox build");
+                    Console.WriteLine($"{label}: no sandbox build");
+                    if (!options.AllowMissingBuild)
+                        failures++;
                     continue;
                 }
 
@@ -59,10 +62,10 @@ internal sealed class ValidationRunner(RunnerOptions options)
                 Directory.CreateDirectory(workDir);
 
                 var artifactRoot = await DownloadAndExtractAsync(http, build, workDir);
-                var executable = FindLinuxExecutable(artifactRoot, build);
+                var executable = FindExecutable(artifactRoot, build, options.TargetPlatform);
                 if (executable is null)
                 {
-                    Console.WriteLine($"{label}: no linux executable");
+                    Console.WriteLine($"{label}: no executable");
                     failures++;
                     continue;
                 }
@@ -105,7 +108,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
         return address;
     }
 
-    private async Task<BuildRecord?> FindLatestLinuxSandboxBuildAsync(HttpClient http, ProfileTarget profile)
+    private async Task<BuildRecord?> FindLatestSandboxBuildAsync(HttpClient http, ProfileTarget profile)
     {
         var path = "api/ci-builds?"
             + $"framework={Uri.EscapeDataString(profile.Framework)}"
@@ -122,13 +125,26 @@ internal sealed class ValidationRunner(RunnerOptions options)
                 || string.Equals(b.Status, "completed", StringComparison.OrdinalIgnoreCase))
             .Where(b => b.FlagSandbox)
             .Where(b => b.UnityDetail?.FolderAvailable != false)
-            .Where(b => ContainsLinux(b.UnityDetail?.TargetPlatform) || ContainsLinux(b.ArtifactPath) || ContainsLinux(b.BuildIdentifier))
+            .Where(b => MatchesTarget(b.UnityDetail?.TargetPlatform, options.TargetPlatform)
+                || MatchesTarget(b.ArtifactPath, options.TargetPlatform)
+                || MatchesTarget(b.BuildIdentifier, options.TargetPlatform))
             .OrderByDescending(b => b.CompletedAt ?? b.CreatedAt ?? DateTimeOffset.MinValue)
             .FirstOrDefault();
     }
 
-    private static bool ContainsLinux(string? value) =>
-        value?.Contains("linux", StringComparison.OrdinalIgnoreCase) == true;
+    private static bool MatchesTarget(string? value, string targetPlatform)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return targetPlatform switch
+        {
+            "windows" => value.Contains("windows", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("win64", StringComparison.OrdinalIgnoreCase),
+            "linux" => value.Contains("linux", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
 
     private async Task<string> DownloadAndExtractAsync(HttpClient http, BuildRecord build, string workDir)
     {
@@ -148,11 +164,13 @@ internal sealed class ValidationRunner(RunnerOptions options)
         return extractRoot;
     }
 
-    private static string? FindLinuxExecutable(string artifactRoot, BuildRecord build)
+    private static string? FindExecutable(string artifactRoot, BuildRecord build, string targetPlatform)
     {
         var names = new[]
         {
             build.BuildIdentifier,
+            targetPlatform == "windows" ? "StandaloneWindows64" : null,
+            targetPlatform == "linux" ? "StandaloneLinux64" : null,
             "StandaloneLinux64",
             "TurnOfWar",
             "AreaOfOperations",
@@ -165,10 +183,19 @@ internal sealed class ValidationRunner(RunnerOptions options)
         foreach (var file in Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories))
         {
             var name = Path.GetFileName(file);
-            if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            var baseName = Path.GetFileNameWithoutExtension(file);
+            if (targetPlatform == "windows" && !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (names.Contains(name, StringComparer.OrdinalIgnoreCase) && Directory.Exists(Path.Combine(Path.GetDirectoryName(file)!, $"{name}_Data")))
+            if (targetPlatform == "linux" && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (names.Contains(baseName, StringComparer.OrdinalIgnoreCase) && Directory.Exists(Path.Combine(Path.GetDirectoryName(file)!, $"{baseName}_Data")))
                 return file;
+        }
+
+        if (targetPlatform == "windows")
+        {
+            return Directory.EnumerateFiles(artifactRoot, "*.exe", SearchOption.AllDirectories)
+                .FirstOrDefault(f => Directory.Exists(Path.Combine(Path.GetDirectoryName(f)!, $"{Path.GetFileNameWithoutExtension(f)}_Data")));
         }
 
         return Directory.EnumerateFiles(artifactRoot, "*", SearchOption.AllDirectories)
@@ -214,7 +241,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
             psi.Environment["PLATFORM_AUTH_TOKEN"] = token;
             psi.Environment["GITHUB_TOKEN"] = token;
             psi.Environment["GAME_CLIENT_PATH"] = executable;
-            psi.Environment["CLIENT_TARGET_PLATFORM"] = "linux";
+            psi.Environment["CLIENT_TARGET_PLATFORM"] = options.TargetPlatform;
             psi.Environment["CLIENT_FRAMEWORK"] = profile.Framework;
             psi.Environment["CLIENT_PROFILE"] = profile.Profile;
             psi.Environment["DOTNET_ROLL_FORWARD"] = "Major";
@@ -252,7 +279,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
         request.Headers.Add("X-Profile", profile.Profile);
         request.Headers.Add("X-Suite", "validation-runner");
         request.Headers.Add("X-Tier", "cloud");
-        request.Headers.Add("X-Platform", "linux");
+        request.Headers.Add("X-Platform", options.TargetPlatform);
         request.Headers.Add("X-Category", "PackagedRuntime");
         request.Headers.Add("X-Branch", Environment.GetEnvironmentVariable("GITHUB_REF_NAME") ?? "main");
         request.Headers.Add("X-Actor", Environment.GetEnvironmentVariable("GITHUB_ACTOR") ?? "validation-runner");
@@ -312,28 +339,60 @@ internal sealed class ValidationRunner(RunnerOptions options)
     }
 }
 
-internal sealed record RunnerOptions(string GameClientRoot, string WorkRoot)
+internal sealed record RunnerOptions(string GameClientRoot, string WorkRoot, string TargetPlatform, bool AllowMissingBuild)
 {
     public static RunnerOptions Parse(string[] args)
     {
         var gameClient = Environment.GetEnvironmentVariable("GAMECLIENT_CONFIG_ROOT")
             ?? Path.Combine(Environment.CurrentDirectory, "GameClient");
+        var targetPlatform = NormalizeTarget(Environment.GetEnvironmentVariable("VALIDATION_TARGET") ?? "linux");
+        var allowMissingBuild = BoolFromString(Environment.GetEnvironmentVariable("VALIDATION_ALLOW_MISSING_BUILD"));
 
         for (var i = 0; i < args.Length; i++)
         {
             if (args[i] == "--gameclient" && i + 1 < args.Length)
+            {
                 gameClient = args[++i];
+                continue;
+            }
+
+            if (args[i] == "--target" && i + 1 < args.Length)
+            {
+                targetPlatform = NormalizeTarget(args[++i]);
+                continue;
+            }
+
+            if (args[i] == "--allow-missing-build" && i + 1 < args.Length)
+            {
+                allowMissingBuild = BoolFromString(args[++i]);
+            }
         }
 
         var work = Path.Combine(Environment.CurrentDirectory, ".runner");
         Directory.CreateDirectory(work);
-        return new RunnerOptions(Path.GetFullPath(gameClient), work);
+        return new RunnerOptions(Path.GetFullPath(gameClient), work, targetPlatform, allowMissingBuild);
+    }
+
+    private static string NormalizeTarget(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        if (normalized == "win" || normalized == "windows" || normalized == "windows64")
+            return "windows";
+        if (normalized == "linux" || normalized == "linux64")
+            return "linux";
+
+        throw new ArgumentException($"Unsupported validation target '{value}'. Use 'windows' or 'linux'.");
+    }
+
+    private static bool BoolFromString(string? value)
+    {
+        return bool.TryParse(value, out var parsed) && parsed;
     }
 }
 
 internal static class ProfileDiscovery
 {
-    public static IEnumerable<ProfileTarget> Discover(string gameClientRoot)
+    public static IEnumerable<ProfileTarget> Discover(string gameClientRoot, string targetPlatform)
     {
         var frameworksPath = Path.Combine(gameClientRoot, "config", "frameworks.yml");
         var profileRoot = Path.Combine(gameClientRoot, "config", "submodule-profiles");
@@ -358,7 +417,7 @@ internal static class ProfileDiscovery
             var matching = buildProfiles.Values
                 .Select(AsMap)
                 .FirstOrDefault(bp => string.Equals(AsString(bp.GetValueOrDefault("profile")), profileName, StringComparison.OrdinalIgnoreCase)
-                    && SupportsLinuxSandbox(bp));
+                    && SupportsSandboxTarget(bp, targetPlatform));
             if (matching is null)
                 continue;
 
@@ -370,7 +429,7 @@ internal static class ProfileDiscovery
         }
     }
 
-    private static bool SupportsLinuxSandbox(Dictionary<object, object?> buildProfile)
+    private static bool SupportsSandboxTarget(Dictionary<object, object?> buildProfile, string targetPlatform)
     {
         var shapes = AsStringList(buildProfile.GetValueOrDefault("enabled_shapes"));
         if (!shapes.Contains("sandbox", StringComparer.OrdinalIgnoreCase))
@@ -378,13 +437,19 @@ internal static class ProfileDiscovery
 
         var targets = AsStringList(buildProfile.GetValueOrDefault("supported_targets"));
         var os = AsStringList(buildProfile.GetValueOrDefault("supported_os"));
-        if (targets.Contains("sandboxLinux", StringComparer.OrdinalIgnoreCase))
-            return true;
-        if (os.Contains("linux64", StringComparer.OrdinalIgnoreCase))
-            return true;
-
         var platforms = AsMap(buildProfile.GetValueOrDefault("platforms"));
-        return platforms.ContainsKey("linux");
+        return targetPlatform switch
+        {
+            "windows" => targets.Contains("standaloneWin64", StringComparer.OrdinalIgnoreCase)
+                || targets.Contains("steamWin64", StringComparer.OrdinalIgnoreCase)
+                || os.Contains("windows64", StringComparer.OrdinalIgnoreCase)
+                || platforms.ContainsKey("windows"),
+            "linux" => targets.Contains("sandboxLinux", StringComparer.OrdinalIgnoreCase)
+                || targets.Contains("steamLinux", StringComparer.OrdinalIgnoreCase)
+                || os.Contains("linux64", StringComparer.OrdinalIgnoreCase)
+                || platforms.ContainsKey("linux"),
+            _ => false
+        };
     }
 
     private static Dictionary<object, object?> AsMap(object? value) =>

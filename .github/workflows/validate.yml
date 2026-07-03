@@ -16,9 +16,19 @@ concurrency:
 
 jobs:
   validate:
-    name: validate
-    runs-on: ubuntu-latest
+    name: validate-${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows
+            os: windows-latest
+            allow_missing_build: false
+          - target: linux
+            os: ubuntu-latest
+            allow_missing_build: true
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
@@ -48,7 +58,12 @@ jobs:
         run: dotnet restore ValidationRunner.sln --nologo --verbosity quiet
 
       - name: Run validation
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GAMECLIENT_CONFIG_ROOT: ${{ github.workspace }}/GameClient
-        run: dotnet run --project src/ValidationRunner -- --gameclient "$GAMECLIENT_CONFIG_ROOT"
+        run: >
+          dotnet run --project src/ValidationRunner --
+          --gameclient "$GAMECLIENT_CONFIG_ROOT"
+          --target "${{ matrix.target }}"
+          --allow-missing-build "${{ matrix.allow_missing_build }}"
