@@ -8,6 +8,10 @@ Windows is strict and fails when a matching build or test pass fails. Linux is w
 
 Actions output is intentionally terse. `dotnet test` output is redirected to files and the log prints only profile-level totals.
 
+## Platform Connectivity
+
+The platform is reachable from GitHub-hosted runners only via a Cloudflare Quick Tunnel, whose hostname rotates on every restart (see `WebPlatform/github-pages-deploy/config.json`). A per-profile network-level failure (DNS resolution, connection refused, timeout, or a 502/503/504 response) is retried up to 3 times with exponential backoff before being counted. If it still fails, the profile is reported as `platform_unreachable` rather than `failures` in the per-line and summary output, so a run that failed because the platform itself was unreachable is distinguishable at a glance from a run where packaged runtime tests actually failed. Both still fail the job overall (exit code 1) — this only changes how the failure is labeled, not whether it's reported as green.
+
 ## Required Configuration
 
 Set repository secrets or variables:

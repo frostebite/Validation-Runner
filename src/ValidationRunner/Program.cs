@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Security;
 using System.Text;
 using System.Text.Json;
@@ -32,7 +33,18 @@ internal sealed class ValidationRunner(RunnerOptions options)
             return 2;
         }
 
-        var platformBaseUrl = await ResolvePlatformBaseUrlAsync();
+        string platformBaseUrl;
+        try
+        {
+            platformBaseUrl = await WithRetryAsync(ResolvePlatformBaseUrlAsync, "startup", "resolve platform URL");
+        }
+        catch (Exception ex) when (IsPlatformUnreachable(ex))
+        {
+            Console.WriteLine($"startup: platform_unreachable error={FormatSafeError(ex)}");
+            Console.WriteLine("summary profiles=0 failures=0 platform_unreachable=1");
+            return 1;
+        }
+
         using var http = new HttpClient { BaseAddress = new Uri(platformBaseUrl.TrimEnd('/') + "/") };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("Validation-Runner/1.0");
@@ -42,6 +54,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
         Console.WriteLine($"profiles={profiles.Count}");
 
         var failures = 0;
+        var platformUnreachable = 0;
         var index = 0;
         foreach (var profile in profiles)
         {
@@ -49,7 +62,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
             var label = $"{options.TargetPlatform}:{profile.Framework}/{profile.Profile}";
             try
             {
-                var build = await FindLatestSandboxBuildAsync(http, profile);
+                var build = await WithRetryAsync(() => FindLatestSandboxBuildAsync(http, profile), label, "list builds");
                 if (build is null)
                 {
                     Console.WriteLine($"{label}: no sandbox build");
@@ -61,7 +74,7 @@ internal sealed class ValidationRunner(RunnerOptions options)
                 var workDir = Path.Combine(options.WorkRoot, Slug(label), build.Id.ToString(CultureInfo.InvariantCulture));
                 Directory.CreateDirectory(workDir);
 
-                var artifactRoot = await DownloadAndExtractAsync(http, build, workDir);
+                var artifactRoot = await WithRetryAsync(() => DownloadAndExtractAsync(http, build, workDir), label, "download build");
                 var executable = FindExecutable(artifactRoot, build, options.TargetPlatform);
                 if (executable is null)
                 {
@@ -77,6 +90,11 @@ internal sealed class ValidationRunner(RunnerOptions options)
                 if (result.Failed > 0 || result.ExitCode != 0)
                     failures++;
             }
+            catch (Exception ex) when (IsPlatformUnreachable(ex))
+            {
+                platformUnreachable++;
+                Console.WriteLine($"{label}: platform_unreachable error={FormatSafeError(ex)}");
+            }
             catch (Exception ex)
             {
                 failures++;
@@ -84,9 +102,37 @@ internal sealed class ValidationRunner(RunnerOptions options)
             }
         }
 
-        Console.WriteLine($"summary profiles={profiles.Count} failures={failures}");
-        return failures == 0 ? 0 : 1;
+        Console.WriteLine($"summary profiles={profiles.Count} failures={failures} platform_unreachable={platformUnreachable}");
+        return failures == 0 && platformUnreachable == 0 ? 0 : 1;
     }
+
+    private static async Task<T> WithRetryAsync<T>(Func<Task<T>> action, string label, string operation, int maxAttempts = 3)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await action();
+            }
+            catch (Exception ex) when (attempt < maxAttempts && IsPlatformUnreachable(ex))
+            {
+                var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
+                Console.WriteLine($"{label}: {operation} attempt {attempt}/{maxAttempts} failed ({FormatSafeError(ex)}), retrying in {delay.TotalSeconds:0}s");
+                await Task.Delay(delay);
+            }
+        }
+    }
+
+    private static bool IsPlatformUnreachable(Exception ex) => ex switch
+    {
+        HttpRequestException { StatusCode: null } => true,
+        HttpRequestException { StatusCode: System.Net.HttpStatusCode.BadGateway
+            or System.Net.HttpStatusCode.ServiceUnavailable
+            or System.Net.HttpStatusCode.GatewayTimeout } => true,
+        TaskCanceledException => true,
+        SocketException => true,
+        _ => ex.InnerException is not null && IsPlatformUnreachable(ex.InnerException)
+    };
 
     private async Task<string> ResolvePlatformBaseUrlAsync()
     {
