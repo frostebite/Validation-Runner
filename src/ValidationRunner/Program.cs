@@ -44,6 +44,12 @@ internal sealed class ValidationRunner(RunnerOptions options)
             Console.WriteLine("summary profiles=0 failures=0 platform_unreachable=1");
             return 1;
         }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"startup: error={FormatSafeError(ex)}");
+            Console.WriteLine("summary profiles=0 failures=1 platform_unreachable=0");
+            return 1;
+        }
 
         using var http = new HttpClient { BaseAddress = new Uri(platformBaseUrl.TrimEnd('/') + "/") };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
