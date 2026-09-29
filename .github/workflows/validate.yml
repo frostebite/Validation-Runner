@@ -21,14 +21,24 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
+      # Windows only. There is no Linux sandbox build to validate: every
+      # platform-scoped sandbox entry in GameClient's config/frameworks.yml sits
+      # under a `platforms.windows` block (no profile has one under
+      # `platforms.linux`), and pipeline.yml's push-main Sandbox Build job
+      # hardcodes `platform: 'windows'`.
+      #
+      # A linux lane therefore matched no build on any run it ever made, and
+      # reported a green that validated nothing: `allow_missing_build: true` made
+      # "no build exists for this target" indistinguishable from "this build
+      # passed". That is the failure this workflow exists to catch, so it must not
+      # model it. Re-add a linux entry here only once CI actually produces a Linux
+      # sandbox artifact (and then with allow_missing_build: false, so an absent
+      # artifact is a failure rather than a silent pass).
       matrix:
         include:
           - target: windows
             os: windows-latest
             allow_missing_build: false
-          - target: linux
-            os: ubuntu-latest
-            allow_missing_build: true
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
